@@ -1,0 +1,263 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+// © Panextech - Based on LuxAlgo Smart Money Concepts Logic
+
+//@version=6
+indicator('Strong/Weak High & Low Levels', 'SWH/L', overlay=true, max_labels_count=500, max_lines_count=500)
+
+//---------------------------------------------------------------------------------------------------------------------}
+//CONSTANTS & COLORS
+//---------------------------------------------------------------------------------------------------------------------{
+BULLISH                         = +1
+BEARISH                         = -1
+BULLISH_LEG                     = 1
+BEARISH_LEG                     = 0
+
+GREEN                           = #089981
+RED                             = #F23645
+BLUE                            = #2157f3
+GRAY                            = #878b94
+MONO_BULLISH                    = #b2b5be
+MONO_BEARISH                    = #5d606b
+
+SOLID                           = '⎯⎯⎯'
+DASHED                          = '----'
+DOTTED                          = '····'
+
+//---------------------------------------------------------------------------------------------------------------------}
+//INPUTS
+//---------------------------------------------------------------------------------------------------------------------{
+swingsLengthInput               = input.int(    50,         'Swing Length',             minval = 10)
+showSwingPointsInput            = input(        true,       'Show Swing Points',        inline = 'swings')
+showLabelsInput                 = input(        true,       'Show Labels',              inline = 'labels')
+showLinesInput                  = input(        true,       'Show Lines',               inline = 'lines')
+labelSizeInput                  = input.string( size.small, 'Label Size',               options = [size.tiny, size.small, size.normal])
+
+strongHighColorInput            = input(        RED,        'Strong High Color')
+weakHighColorInput              = input(        color.new(RED, 50), 'Weak High Color')
+strongLowColorInput             = input(        GREEN,      'Strong Low Color')
+weakLowColorInput               = input(        color.new(GREEN, 50), 'Weak Low Color')
+
+showStyleToggleInput            = input.string( 'Colored',  'Style',                    options = ['Colored', 'Monochrome'])
+
+lineStyleInput                  = input.string( SOLID,      'Line Style',               options = [SOLID, DASHED, DOTTED])
+lineExtendInput                 = input(        true,       'Extend Lines')
+showInfoBoxInput                = input(        true,       'Show Info Box')
+
+//---------------------------------------------------------------------------------------------------------------------}
+//DATA STRUCTURES
+//---------------------------------------------------------------------------------------------------------------------{
+// @type UDT representing a swing pivot point
+// @field currentLevel current price level
+// @field lastLevel last price level  
+// @field crossed true if level is crossed
+// @field barTime bar time
+// @field barIndex bar index
+type pivot
+    float currentLevel
+    float lastLevel
+    bool crossed
+    int barTime = time
+    int barIndex = bar_index
+
+// @type UDT representing trend bias
+// @field bias BULLISH or BEARISH
+type trend
+    int bias
+
+// @type UDT representing trailing swing extremes
+// @field top last swing high price
+// @field bottom last swing low price
+// @field barTime last swing bar time
+// @field barIndex last swing bar index
+// @field lastTopTime last swing high time
+// @field lastBottomTime last swing low time
+// @field isStrong true if high/low is strong
+type trailingExtremes
+    float top
+    float bottom
+    int barTime
+    int barIndex
+    int lastTopTime
+    int lastBottomTime
+    bool isStrongHigh
+    bool isStrongLow
+
+//---------------------------------------------------------------------------------------------------------------------}
+//VARIABLES
+//---------------------------------------------------------------------------------------------------------------------{
+var pivot swingHigh              = pivot.new(na, na, false)
+var pivot swingLow               = pivot.new(na, na, false)
+var trend swingTrend             = trend.new(0)
+var trailingExtremes trailing    = trailingExtremes.new()
+
+var array<line> swingLines       = array.new<line>()
+var array<label> swingLabels     = array.new<label>()
+
+// Colors based on style
+var strongHighColor             = showStyleToggleInput == 'Monochrome' ? MONO_BEARISH : strongHighColorInput
+var weakHighColor               = showStyleToggleInput == 'Monochrome' ? color.new(MONO_BEARISH, 50) : weakHighColorInput
+var strongLowColor              = showStyleToggleInput == 'Monochrome' ? MONO_BULLISH : strongLowColorInput
+var weakLowColor                = showStyleToggleInput == 'Monochrome' ? color.new(MONO_BULLISH, 50) : weakLowColorInput
+
+var table infoBox               = na
+
+//---------------------------------------------------------------------------------------------------------------------}
+//USER-DEFINED FUNCTIONS
+//---------------------------------------------------------------------------------------------------------------------{
+
+// @function Get the value of the current leg (0 = bearish, 1 = bullish)
+// @returns int
+leg(int size) =>
+    var leg     = 0
+    newLegHigh  = high[size] > ta.highest(size)
+    newLegLow   = low[size]  < ta.lowest(size)
+    
+    if newLegHigh
+        leg := BEARISH_LEG
+    else if newLegLow
+        leg := BULLISH_LEG
+    leg
+
+// @function Identify start of new leg (swing)
+// @param leg (int) Current leg value
+// @returns bool
+startOfNewLeg(int leg) => ta.change(leg) != 0
+
+// @function Identify start of bearish leg
+// @param leg (int) Current leg value
+// @returns bool
+startOfBearishLeg(int leg) => ta.change(leg) == -1
+
+// @function Identify start of bullish leg
+// @param leg (int) Current leg value
+// @returns bool
+startOfBullishLeg(int leg) => ta.change(leg) == +1
+
+// @function Get line style from string
+// @param style line style string
+// @returns string
+getLineStyle(string style) =>
+    switch style
+        SOLID => line.style_solid
+        DASHED => line.style_dashed
+        DOTTED => line.style_dotted
+
+// @function Draw a line from pivot to current bar
+// @param p_ivot pivot point
+// @param levelColor color of line
+// @param lineStyle line style
+// @returns line ID
+drawSwingLine(pivot p_ivot, color levelColor, string lineStyle) =>
+    var line l_ine = na
+    
+    if showLinesInput
+        l_ine.delete()
+        extend = lineExtendInput ? extend.right : extend.none
+        l_ine := line.new(chart.point.new(p_ivot.barTime, na, p_ivot.currentLevel), chart.point.new(time, na, p_ivot.currentLevel), xloc=xloc.bar_time, color=levelColor, style=lineStyle, extend=extend)
+    l_ine
+
+// @function Draw a label at pivot point
+// @param p_ivot pivot point
+// @param tag text to display
+// @param labelColor text color
+// @param labelStyle label style
+// @returns label ID
+drawSwingLabel(pivot p_ivot, string tag, color labelColor, string labelStyle) =>
+    var label l_abel = na
+    
+    if showLabelsInput
+        l_abel.delete()
+        l_abel := label.new(chart.point.new(na, math.round(0.5 * (p_ivot.barIndex + bar_index)), p_ivot.currentLevel), tag, xloc=xloc.bar_index, color=color(na), textcolor=labelColor, style=labelStyle, size=labelSizeInput)
+    l_abel
+
+// @function Update swing pivots and detect strong/weak levels
+// @param size swing length
+// @returns void
+getCurrentSwingStructure(int size) =>
+    currentLeg   = leg(size)
+    newPivot     = startOfNewLeg(currentLeg)
+    pivotLow     = startOfBullishLeg(currentLeg)
+    pivotHigh    = startOfBearishLeg(currentLeg)
+
+    if newPivot
+        if pivotLow
+            pivot p_ivot = swingLow
+            
+            // Determine if LOW is STRONG or WEAK
+            // STRONG LOW: lower than the previous pivot low (LL)
+            // WEAK LOW: higher than the previous pivot low (HL)
+            isStrongLow = p_ivot.currentLevel > low[size]
+            
+            p_ivot.lastLevel    := p_ivot.currentLevel
+            p_ivot.currentLevel := low[size]
+            p_ivot.crossed      := false
+            p_ivot.barTime      := time[size]
+            p_ivot.barIndex     := bar_index[size]
+            
+            trailing.bottom         := p_ivot.currentLevel
+            trailing.barTime        := p_ivot.barTime
+            trailing.barIndex       := p_ivot.barIndex
+            trailing.lastBottomTime := p_ivot.barTime
+            trailing.isStrongLow    := isStrongLow
+            
+            if showSwingPointsInput
+                labelTag = isStrongLow ? 'SL' : 'WL'
+                labelColor = isStrongLow ? strongLowColor : weakLowColor
+                labelStyle = label.style_label_up
+                drawSwingLine(p_ivot, labelColor, getLineStyle(lineStyleInput))
+                drawSwingLabel(p_ivot, labelTag, labelColor, labelStyle)
+                
+        else
+            pivot p_ivot = swingHigh
+            
+            // Determine if HIGH is STRONG or WEAK
+            // STRONG HIGH: higher than the previous pivot high (HH)
+            // WEAK HIGH: lower than the previous pivot high (LH)
+            isStrongHigh = p_ivot.currentLevel < high[size]
+            
+            p_ivot.lastLevel    := p_ivot.currentLevel
+            p_ivot.currentLevel := high[size]
+            p_ivot.crossed      := false
+            p_ivot.barTime      := time[size]
+            p_ivot.barIndex     := bar_index[size]
+            
+            trailing.top            := p_ivot.currentLevel
+            trailing.barTime        := p_ivot.barTime
+            trailing.barIndex       := p_ivot.barIndex
+            trailing.lastTopTime    := p_ivot.barTime
+            trailing.isStrongHigh   := isStrongHigh
+            
+            if showSwingPointsInput
+                labelTag = isStrongHigh ? 'SH' : 'WH'
+                labelColor = isStrongHigh ? strongHighColor : weakHighColor
+                labelStyle = label.style_label_down
+                drawSwingLine(p_ivot, labelColor, getLineStyle(lineStyleInput))
+                drawSwingLabel(p_ivot, labelTag, labelColor, labelStyle)
+
+//---------------------------------------------------------------------------------------------------------------------}
+//EXECUTION
+//---------------------------------------------------------------------------------------------------------------------}
+getCurrentSwingStructure(swingsLengthInput)
+
+if barstate.islast and showInfoBoxInput
+    if not na(infoBox)
+        infoBox.delete()
+    
+    infoBox := table.new(position=table.position.top_right, rows=5, columns=2, border_color=color.gray, border_width=1, frame_color=color.gray, frame_width=1)
+    
+    table.cell(infoBox, 0, 0, 'Strong High (SH)', text_color=strongHighColor, bgcolor=color.new(strongHighColor, 90))
+    table.cell(infoBox, 0, 1, 'HH - Higher High', text_size=size.small)
+    
+    table.cell(infoBox, 1, 0, 'Weak High (WH)', text_color=weakHighColor, bgcolor=color.new(weakHighColor, 90))
+    table.cell(infoBox, 1, 1, 'LH - Lower High', text_size=size.small)
+    
+    table.cell(infoBox, 2, 0, 'Strong Low (SL)', text_color=strongLowColor, bgcolor=color.new(strongLowColor, 90))
+    table.cell(infoBox, 2, 1, 'LL - Lower Low', text_size=size.small)
+    
+    table.cell(infoBox, 3, 0, 'Weak Low (WL)', text_color=weakLowColor, bgcolor=color.new(weakLowColor, 90))
+    table.cell(infoBox, 3, 1, 'HL - Higher Low', text_size=size.small)
+    
+    table.cell(infoBox, 4, 0, 'Swing Length:', text_color=color.white, text_size=size.small)
+    table.cell(infoBox, 4, 1, str.tostring(swingsLengthInput), text_color=color.white, text_size=size.small)
+
+//---------------------------------------------------------------------------------------------------------------------}
